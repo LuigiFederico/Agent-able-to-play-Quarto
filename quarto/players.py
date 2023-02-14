@@ -1,6 +1,6 @@
 from copy import deepcopy
 import numpy as np
-from objects import Player, Quarto
+from .objects import Player, Quarto
 
 WIN = 5
 LOSE = -5
@@ -25,14 +25,16 @@ dec_to_bin = {
     15: [1, 1, 1, 1]
 }
 
-class the_choosen_one(Player):
+class MyPlayer(Player):
+
+    MINMAX_MAX_DEPTH = 2
 
     def __init__(self, quarto: Quarto) -> None:
-        super.__init__(quarto)
+        super().__init__(quarto)
         self.frontiers = self.get_frontiers()
         self.piece_to_give = -1    
 
-    # ToDo
+    
     def choose_piece(self) -> int:
         # Best piece to give computed inside self.place_piece() with MinMax
         if self.piece_to_give != -1:
@@ -44,11 +46,17 @@ class the_choosen_one(Player):
         board = self.get_game().get_board_status()
         safe, threat = self.distinguish_pieces(board)
 
-        
+        # Threat mode -> MinMax
+        if len(threat) > 0:
+            piece, _ = self.min_max_choose_piece(board, 0)
 
-        raise NotImplemented
+        # Safe mode -> Heuristic strategy
+        else:
+            piece = self.__safe_mode_choose_piece(safe)
 
-    
+        return piece
+
+
     def place_piece(self) -> tuple[int, int]:
     
         # Setup
@@ -61,31 +69,32 @@ class the_choosen_one(Player):
             # If I have to place a threat piece, I win
             if piece_to_place in threat:   
                 score_board = self.__board_intersection_scores(piece_to_place)      
-                ply = np.unravel_index(np.argmax(score_board), score_board.shape)   # Max score on the winning position
+                ply_ = np.unravel_index(np.argmax(score_board), score_board.shape)   # Max score on the winning position
+                ply = (ply_[1], ply_[0])
                 return ply
 
             # MinMax
-            ply, piece, _ = self.min_max_place_piece(board, piece_to_place, player = 0)
+            ply_, piece, _ = self.min_max_place_piece(board, piece_to_place, player = 0)
+            ply = (ply_[1], ply_[0])
             if piece != -1:
                 self.piece_to_give = piece  # No need to run MinMax again to choose the piece
 
-        # Safe mode -> Euristic strategy
+        # Safe mode -> Heuristic strategy
         else:   
-            ply = self.__safe_mode_place_piece(piece_to_place, delay_minmax = True)
-
+            ply_ = self.__safe_mode_place_piece(piece_to_place, delay_minmax = True)
+            ply = (ply_[1], ply_[0])
         return ply
 
-    # ToDo (Sistamre la descrizione)
     @staticmethod
     def get_frontiers():
         """
             Generates all the frontiers for each possible combination of 1, 2 and 3 elements.
 
-            Returns a dictionary with a tuple as key, containing the numbers (1, 2 or 3 numbers)
-            representative for the frontier. The frontier is a dictionary with keys between 0, 1, 2 and 3 
-            according to how many attributes the representative tuple has in common with the number inside the value of the frontier.
-
-            DA RIPARAFRASARE #########################################
+            Returns a dictionary frontiers with:
+            - key = tuple containing the source pieces of the respetive frontiers. Could have len = 1, 2 or 3.
+            - value: the frontier corresponding to the source pieces as a dictionary with:
+                - key: number of attributes in common with the pieces inside the level of the frontier. key = 0, 1, 2 or 3.
+                - value: pieces that share key elements in common with the source pieces.
         """
         
         def get_frontier(p: int):
@@ -291,7 +300,24 @@ class the_choosen_one(Player):
 
         return board_scores
 
-    # Tuning: delay_minmax
+ 
+    def __safe_mode_choose_piece(self, safe_pool) -> int:
+        """ 
+            Retrieves the piece with the lowest total score computed using the frontiers.
+            This should be the piece that gives to the opponent the lowest advantage.
+        """
+        best_piece = -1
+        best_score = 500
+        
+        for p in iter(safe_pool):   # Min search
+            board_score = self.__board_intersection_scores(p)
+            score = board_score.sum()
+            if score < best_score:
+                best_piece = p
+
+        return best_piece
+
+
     def __safe_mode_place_piece(self, piece: int, *, delay_minmax = True) -> tuple[int, int]:
         
         # Setup
@@ -302,14 +328,18 @@ class the_choosen_one(Player):
         if delay_minmax:
             possible_actions = sorted(possible_actions, key=lambda a: a[1])    # ascending score (MinMax delayed amap)
         else:
-            possible_actions = sorted(possible_actions, key=lambda a: -a[1])     # descending score (MinMax asap) 
+            possible_actions = sorted(possible_actions, key=lambda a: -a[1])   # descending score (MinMax asap) 
 
         # Check if the action is safe (if there are enough pieces to choose)
         idx = 0
         ply, score = possible_actions[idx]
+
         while (self.__check_place_ply(ply, piece) == False):
             idx += 1
-            ply, score = possible_actions[idx]
+            if idx < len(possible_actions): 
+                ply, score = possible_actions[idx]
+            else:
+                break
 
         return ply
 
@@ -328,7 +358,7 @@ class the_choosen_one(Player):
         
         return possible_actions
 
-    # Tuning: safe_threashold
+
     def __check_place_ply(self, ply: tuple[int, int], piece: int, *, safe_threshold = 1):
         """ 
             Returns True if there are enough safe pieces to choose after placing 
@@ -348,9 +378,9 @@ class the_choosen_one(Player):
             return False
 
 
-    def min_max_place_piece(self, board_now, piece, player):
+    def min_max_place_piece(self, board_now, piece, player, cnt=0):
         """
-            MinMax algorithm with alpha-beta pruning and greedy sorting for placing a piece.
+            MinMax algorithm with alpha-beta pruning, deep pruning, horizontal pruning and greedy sorting for placing a piece.
 
             The greedy sorting tryes to speed up MinMax by sorting the possible actions by 
             the corresponding score computed with self.__list_ply_score(•).
@@ -371,33 +401,44 @@ class the_choosen_one(Player):
         possible_actions = self.__list_ply_score(board_now, piece)          # Descending score:
         possible_actions = sorted(possible_actions, key=lambda a: a[1])     # Greedy sorting to speed up alpha-beta pruning
 
+        if cnt > self.MINMAX_MAX_DEPTH:
+            return possible_actions[0], -1, 0
+
+        possible_actions = [a for a in possible_actions if a[1] > 0]        # Horizontal pruning
+        ply_drow = (-1, -1)
+        piece_drow = -1
+        best_score = 0
+
         for ply, _ in iter(possible_actions):
             if board_now[ply[0], ply[1]] != -1:     # Check that the ply is legal
                 continue
             board = deepcopy(board_now)             # Ply     
             board[ply[0], ply[1]] = piece
             
-            if self.check_win(board):               # Termination
+            if self.check_finished(board):               # Termination
                 if player == 0:
                     return ply, -1, WIN
                 else:
                     return ply, -1, LOSE
             
-            piece, score = self.min_max_choose_piece(board, player)  # Recursion
-
+            piece, score = self.min_max_choose_piece(board, player, cnt)  # Recursion
+            
+            
             if score == WIN and player == 0:        # Alpha-Beta Pruning
                 return ply, piece, WIN
             if score == LOSE and player == 1:
                 return ply, piece, LOSE
-            if score == DROW:                       # If drow, keep looking for a better ply
-                ply_drow = ply
-                piece_drow = piece
+            # If drow or else, keep looking for a better ply
+            ply_drow = ply
+            piece_drow = piece
+            if score == DROW:
+                best_score = DROW
 
         # No winning condition -> drow 
-        return ply_drow, piece_drow, DROW
+        return ply_drow, piece_drow, best_score
 
 
-    def min_max_choose_piece(self, board, player):
+    def min_max_choose_piece(self, board, player, cnt=0):
         """
             MinMax algorithm for choosing a piece with alpha-beta pruning and greedy sorting.
 
@@ -427,6 +468,9 @@ class the_choosen_one(Player):
                 return threat[0], LOSE
             else:
                 return threat[0], WIN
+        
+        if cnt > self.MINMAX_MAX_DEPTH:
+            return safe[0], 0
 
         # Greedy sorting to speed up MinMax pruning
         piece_score = []
@@ -436,18 +480,22 @@ class the_choosen_one(Player):
         piece_score = sorted(piece_score, key=lambda x: -x[1])   # Descending order
 
         # Recursion
+        best_piece = -1
+        best_score = []
         for piece, _ in iter(piece_score):
-            _, _, score = self.min_max_place_piece(board, piece, player = (player + 1) % 2 )  
+            _, _, score = self.min_max_place_piece(board, piece, (player + 1) % 2, cnt+1)  
             
             if player == 0 and score == WIN:        # Alpha-Beta Pruning
                 return piece, WIN
             if player == 1 and score == LOSE:
                 return piece, LOSE
-            if score == DROW:                       # If drow, keep looking
-                piece_drow = piece
+            # If drow or else, keep looking
+            best_piece = piece
+            if score == DROW:
+                best_score = DROW
 
         # No winning condition -> drow 
-        return piece_drow, DROW
+        return best_piece, best_score
 
 
     def check_finished(self, board):
